@@ -11,7 +11,7 @@ parser.add_argument('destination', help='destination path')
 parser.add_argument('-j', default=8, type=int, help='number of threads to use')
 parser.add_argument('-c', default=1000, type=int, help='number of files in one chunk')
 
-parser.add_argument('--resume', default=False, help='resume previous job (skip finding files)')
+parser.add_argument('--resume', default=False, action='store_true', help='resume previous job (skip finding files)')
 parser.add_argument('--dry', action='store_true', help='perform a trial run with no changes made')
 parser.add_argument('--lfs', action='store_true', help='use lustre utilities')
 parser.add_argument('--arcfour', action='store_true', help='use arcfour as compression algorithm')
@@ -52,45 +52,38 @@ else:
 
     # find files
     if ':' in source:
-        # Hacky, but it works. If source is a remote machine (so it's
-        # given with user@machine:/path/to/dir) we just split it at the ":"
-        # This way we can use both parts of the string with the remote find
-        # command.
         source_um, source_path = source.split(':')
-        subprocess.call('ssh %s "cd %s; %s . -type f" > %s' % (source_um, source_path, find, files_file), shell=True)
+        subprocess.run(f'ssh {source_um} "cd {source_path}; {find} . -type f" > {files_file}', shell=True, check=True)
     else:
-        # Source is a local directory.
-        subprocess.call('%s . -type f > %s' % (find, files_file), shell=True, cwd=source)
+        subprocess.run(f'{find} . -type f > {files_file}', shell=True, check=True, cwd=source)
 
     # split the files file in chunks of 1000
     chunk_file = os.path.join(tmp_dir, 'chunk')
-    subprocess.call('split -l %i -d -a 8 %s %s' % (args.c, files_file, chunk_file), shell=True)
+    subprocess.run(f'split -l {args.c} -d -a 8 {files_file} {chunk_file}', shell=True, check=True)
 
     # create a file containing all the copy jobs to perform
-    jobs_file_handler = open(jobs_file, 'w')
-    for filename in sorted(os.listdir(tmp_dir)):
-        if filename.startswith('chunk'):
-            chunk_file = os.path.join(tmp_dir, filename)
-            chunk_num = filename.split('chunk')[1]
-            log_file = os.path.join(tmp_dir, 'log' + chunk_num)
+    with open(jobs_file, 'w') as jobs_file_handler:
+        for filename in sorted(os.listdir(tmp_dir)):
+            if filename.startswith('chunk'):
+                chunk_file = os.path.join(tmp_dir, filename)
+                chunk_num = filename.split('chunk')[1]
+                log_file = os.path.join(tmp_dir, 'log' + chunk_num)
 
-            job = 'rsync -aH --no-l'
-            if args.arcfour:
-                job += ' -e \'ssh -c arcfour\''
-            job += ' --files-from=%s --log-file=%s %s %s\n' % (chunk_file, log_file, source, destination)
+                job = 'rsync -aH --no-l'
+                if args.arcfour:
+                    job += ' -e \'ssh -c arcfour\''
+                job += f' --files-from={chunk_file} --log-file={log_file} {source} {destination}\n'
 
-            jobs_file_handler.write(job)
-
-    jobs_file_handler.close()
+                jobs_file_handler.write(job)
 
 try:
-    n_files = subprocess.check_output('wc -l %s' % files_file, shell=True).split()[0]
-    n_jobs = subprocess.check_output('wc -l %s' % jobs_file, shell=True).split()[0]
+    n_files = subprocess.run(f'wc -l {files_file}', shell=True, check=True, capture_output=True, text=True).stdout.split()[0]
+    n_jobs = subprocess.run(f'wc -l {jobs_file}', shell=True, check=True, capture_output=True, text=True).stdout.split()[0]
 
-    print 'Copying %s files using %s jobs!' % (n_files, n_jobs)
-    print 'tmp_dir is', tmp_dir
+    print(f'Copying {n_files} files using {n_jobs} jobs!')
+    print(f'tmp_dir is {tmp_dir}')
 except AttributeError:
     pass
 
 # run parallel with the jobs file
-subprocess.call('cat %s | parallel -P%i --eta' % (jobs_file, args.j), shell=True)
+subprocess.run(f'cat {jobs_file} | parallel -P{args.j} --eta', shell=True, check=True)
